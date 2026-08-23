@@ -11,13 +11,14 @@ This project operates as an **obfuscated transport tunnel**, not a full Microsof
 * **Authentication Boundary**: Authentication between client and proxy relies on shared UUID masking across the tunnel header. It does not validate real NTLMv2 hashes or compute HMAC-MD5 responses against a Domain Controller.
 
 ## Protocol Stack
-graph TD
-    A["SOCKS5 Local Client Request<br/><i>(IPv4 / IPv6 / Domain Target)</i>"] --> B["Layer 1: X.224 Connection Request / Confirm Negotiation<br/><i>(Port 3389)</i>"]
-    B --> C["Layer 2: TLS Upgrade<br/><i>(TLS 1.2 / 1.3 with RDP SAN certificates)</i>"]
-    C --> D["Layer 3: CredSSP Handshake<br/><i>(ASN.1 BER / NTLMSSP Frame Synthetic)</i>"]
-    D --> E["Layer 4: MCS Control Sequence<br/><i>(Erect Domain, Attach User, Join)</i>"]
-    E --> F["Layer 5: RDP Session Handshake<br/><i>(Client Info, Demand/Confirm)</i>"]
-    F --> G["Layer 6: Virtual Channel Framing + UUID Masked VLESS Proxy Header"]
+flowchart TD
+    A["SOCKS5 Local Client Request<br>(IPv4 / IPv6 / Domain Target)"] --> B
+    B["Layer 1: X.224 Connection Request / Confirm Negotiation<br>(Port 3389)"] --> C
+    C["Layer 2: TLS Upgrade<br>(TLS 1.2 / 1.3 with RDP SAN certificates)"] --> D
+    D["Layer 3: CredSSP Handshake<br>(ASN.1 BER / NTLMSSP Frame Synthetic)"] --> E
+    E["Layer 4: MCS Control Sequence<br>(Erect Domain, Attach User, Join)"] --> F
+    F["Layer 5: RDP Session Handshake<br>(Client Info, Demand/Confirm)"] --> G
+    G["Layer 6: Virtual Channel Framing + UUID Masked VLESS Proxy Header"]
 
 
 ## Setup & Running
