@@ -1,6 +1,6 @@
 [package]
 name = "rdp-vless-tunnel"
-version = "0.8.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -12,4 +12,9 @@ uuid = { version = "1.8", features = ["v4"] }
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 ring = "0.17"
-once_cell = "1.19"
+rustls-pemfile = "2"
+rand = "0.8"
+hostname = "0.4.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1.6"
