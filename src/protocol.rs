@@ -1,6 +1,11 @@
 use anyhow::{bail, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// Maximum BER frame size to prevent memory exhaustion attacks
+const MAX_BER_FRAME: usize = 1024 * 1024; // 1 MiB
+// Maximum TPKT frame size
+const MAX_TPKT_FRAME: usize = 65535;
+
 // --- BER ENCODING UTILITIES ---
 
 pub fn encode_ber_length(len: usize, out: &mut Vec<u8>) {
@@ -65,6 +70,11 @@ pub async fn recv_ber_frame<R: AsyncReadExt + Unpin>(stream: &mut R, buf: &mut V
         bail!("Unsupported BER length format: {:#04x}", header[1]);
     };
 
+    // Prevent unbounded memory allocation attacks
+    if body_len > MAX_BER_FRAME {
+        bail!("BER frame too large: {} bytes (max: {})", body_len, MAX_BER_FRAME);
+    }
+
     buf.resize(body_len, 0);
     stream.read_exact(buf).await?;
     Ok(())
@@ -116,6 +126,9 @@ pub async fn recv_rdp_cr<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Vec<
     if total_len < 19 {
         bail!("TPKT Connection Request frame too short: {}", total_len);
     }
+    if total_len > MAX_TPKT_FRAME {
+        bail!("TPKT Connection Request frame too large: {}", total_len);
+    }
     let body_len = total_len - 4;
     let mut body = vec![0u8; body_len];
     stream.read_exact(&mut body).await?;
@@ -128,8 +141,23 @@ pub async fn recv_rdp_cr<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Vec<
         bail!("Invalid X.224 Connection Request indicator: {:#04x}", body[1]);
     }
 
-    // Validate presence and parameters of RDP_NEG_REQ
-    if let Some(pos) = body.windows(4).position(|w| w == &[0x01, 0x00, 0x08, 0x00]) {
+    // Validate RDP_NEG_REQ at the expected fixed offset after X.224 header
+    // X.224 CR: LI (1 byte) + CD (1 byte) + reserved (5 bytes) = 7 bytes
+    // RDP_NEG_REQ starts at offset 7 + cookie_length (if present)
+    // We search for it at a reasonable position, but validate structure strictly
+    let rdp_neg_req_marker = [0x01u8, 0x00, 0x08, 0x00];
+    let mut found_pos = None;
+    
+    // Search only in valid range (after X.224 header, before end of body)
+    for i in 7..body.len().saturating_sub(4) {
+        if body[i..i+4] == rdp_neg_req_marker {
+            found_pos = Some(i);
+            break;
+        }
+    }
+
+    if let Some(pos) = found_pos {
+        // Verify we have enough bytes for the full RDP_NEG_REQ structure
         if body.len() >= pos + 8 {
             let requested_protocols = u32::from_le_bytes([
                 body[pos + 4],
@@ -140,6 +168,8 @@ pub async fn recv_rdp_cr<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Vec<
             if requested_protocols & 0x03 == 0 {
                 bail!("Client failed to request TLS/CredSSP protocol security");
             }
+        } else {
+            bail!("RDP_NEG_REQ structure truncated");
         }
     } else {
         bail!("Missing required RDP_NEG_REQ structure inside Connection Request");
@@ -150,18 +180,18 @@ pub async fn recv_rdp_cr<R: AsyncReadExt + Unpin>(stream: &mut R) -> Result<Vec<
 
 // --- LAYER 2: CredSSP NLA & ASN.1 / NTLMSSP MESSAGES ---
 
+/// Wrap NTLMSSP data in a valid CredSSP TSRequest structure.
+/// Per MS-CSSP Section 2.2.1:
+/// - version [0] IMPLICIT INTEGER
+/// - negoTokens [1] IMPLICIT OCTET STRING (primitive, tag 0x81)
 pub fn wrap_credssp_ts_request(ntlmssp_data: &[u8]) -> Vec<u8> {
-    let ver_bytes = wrap_ber_tag(0xa0, &[0x02, 0x01, 0x02]); // version [0] INTEGER 2
-    
-    // MS-CSSP Section 2.2.1: negoToken [0] IMPLICIT OCTET STRING
-    let nego_token = wrap_ber_tag(0x80, ntlmssp_data); // Primitive Context Tag [0] (0x80)
-    let nego_data_item = wrap_ber_tag(0x30, &nego_token);
-    let nego_data_seq = wrap_ber_tag(0x30, &nego_data_item);
-    let nego_tokens = wrap_ber_tag(0xa1, &nego_data_seq);
-
     let mut body = Vec::new();
-    body.extend_from_slice(&ver_bytes);
-    body.extend_from_slice(&nego_tokens);
+
+    // version [0] IMPLICIT INTEGER – typically A0 03 02 01 02
+    body.extend_from_slice(&[0xa0, 0x03, 0x02, 0x01, 0x02]);
+
+    // negoTokens [1] IMPLICIT OCTET STRING (primitive context tag 0x81)
+    body.extend_from_slice(&wrap_ber_tag(0x81, ntlmssp_data));
 
     wrap_ber_tag(0x30, &body)
 }
@@ -490,8 +520,9 @@ impl VlessHeader {
     }
 
     pub fn parse(payload: &[u8]) -> Result<Self> {
-        if payload.len() < 18 {
-            bail!("Payload too short for VLESS header");
+        // Minimum valid VLESS header: 1 version + 16 uuid + 1 host_len + 0 host + 2 port = 20 bytes
+        if payload.len() < 20 {
+            bail!("Payload too short for VLESS header (min 20 bytes, got {})", payload.len());
         }
         if payload[0] != 0x01 {
             bail!("Unsupported VLESS version");
