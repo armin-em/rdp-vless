@@ -1,0 +1,13 @@
+[package]
+name = "rdp-vless-tunnel"
+version = "0.7.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-rustls = "0.26"
+rustls-pki-types = "1.7"
+rcgen = "0.13"
+uuid = { version = "1.8", features = ["v4"] }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
