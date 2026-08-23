@@ -14,6 +14,8 @@ This project operates as an **obfuscated transport tunnel**, not a full Microsof
 SOCKS5 Local Client Request (IPv4 / IPv6 / Domain Target)
   │
   ├─► L1: X.224 Connection Request / Confirm Negotiation (Port 3389)
+
+  
   ├─► L2: TLS Upgrade (TLS 1.2 / 1.3 with RDP SAN certificates)
   ├─► L3: CredSSP Handshake (ASN.1 BER / NTLMSSP Frame Synthetic)
   ├─► L4: MCS Control Sequence (Erect Domain, Attach User, Join)
