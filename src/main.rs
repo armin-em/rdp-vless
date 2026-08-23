@@ -22,28 +22,33 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 100;
 const IO_TIMEOUT_SECS: u64 = 30;
 
 // Static Certificate Configuration
-// Generate a static self-signed cert at startup so the fingerprint is consistent for pinning
-static SERVER_CERT_DER: once_cell::sync::Lazy<Vec<u8>> = once_cell::sync::Lazy::new(|| {
+// Generate a single self-signed cert at startup so the fingerprint is consistent for pinning
+// Both client and server must use the SAME certificate/key pair
+static STATIC_CERT: once_cell::sync::Lazy<StaticCert> = once_cell::sync::Lazy::new(|| {
     let san = vec!["win-serv2022-dc.local".to_string(), "localhost".to_string()];
     let cert = generate_simple_self_signed(san).unwrap();
-    cert.cert.der().to_vec()
-});
-
-static SERVER_KEY_DER: once_cell::sync::Lazy<Vec<u8>> = once_cell::sync::Lazy::new(|| {
-    let san = vec!["win-serv2022-dc.local".to_string(), "localhost".to_string()];
-    let cert = generate_simple_self_signed(san).unwrap();
-    cert.key_pair.serialize_der()
-});
-
-// Compute the pinned fingerprint of the static server certificate (SHA-256)
-static PINNED_CERT_FINGERPRINT: once_cell::sync::Lazy<[u8; 32]> = once_cell::sync::Lazy::new(|| {
+    let cert_der = cert.cert.der().to_vec();
+    let key_der = cert.key_pair.serialize_der();
+    
+    // Compute SHA-256 fingerprint
     let mut context = ring::digest::Context::new(&ring::digest::SHA256);
-    context.update(&SERVER_CERT_DER);
+    context.update(&cert_der);
     let digest = context.finish();
-    let mut hash = [0u8; 32];
-    hash.copy_from_slice(digest.as_ref());
-    hash
+    let mut fingerprint = [0u8; 32];
+    fingerprint.copy_from_slice(digest.as_ref());
+    
+    StaticCert {
+        cert_der,
+        key_der,
+        fingerprint,
+    }
 });
+
+struct StaticCert {
+    cert_der: Vec<u8>,
+    key_der: Vec<u8>,
+    fingerprint: [u8; 32],
+}
 
 #[derive(Parser)]
 #[command(name = "rdp-vless-tunnel")]
@@ -123,8 +128,8 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
     // 1. Pre-TLS Connection Negotiation with timeout
     let _cr_body = timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_rdp_cr(&mut stream))
         .await??;
-    stream.write_all(RDP_NEG_CC).await?;
-    stream.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), stream.write_all(RDP_NEG_CC)).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), stream.flush()).await??;
 
     // 2. TLS Upgrade with timeout
     let mut tls_stream = timeout(Duration::from_secs(IO_TIMEOUT_SECS), acceptor.accept(stream))
@@ -138,8 +143,8 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
     let mut server_nonce = [0u8; 8];
     server_nonce.copy_from_slice(&uuid::Uuid::new_v4().as_bytes()[0..8]);
     
-    tls_stream.write_all(&create_ntlmssp_challenge(&server_nonce)).await?;
-    tls_stream.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.write_all(&create_ntlmssp_challenge(&server_nonce))).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.flush()).await??;
 
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_ber_frame(&mut tls_stream, &mut rbuf))
         .await??; // Client NTLMSSP Auth
@@ -147,13 +152,13 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
         bail!("Empty NTLM authentication payload received");
     }
 
-    tls_stream.write_all(&create_credssp_ack()).await?;
-    tls_stream.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.write_all(&create_credssp_ack())).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.flush()).await??;
 
     // 4. MCS Control Sequences with timeouts
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??; // MCS Connect Initial
-    send_tpkt_x224(&mut tls_stream, MCS_CONNECT_RESPONSE).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, MCS_CONNECT_RESPONSE)).await??;
 
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??; // Erect Domain
@@ -162,16 +167,16 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
     
     let user_id = 1001u16;
     let channel_id = 0x03ebu16;
-    send_tpkt_x224(&mut tls_stream, &create_mcs_attach_user_confirm(user_id)).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, &create_mcs_attach_user_confirm(user_id))).await??;
 
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??; // Channel Join Request
-    send_tpkt_x224(&mut tls_stream, &create_mcs_channel_join_confirm(user_id, channel_id)).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, &create_mcs_channel_join_confirm(user_id, channel_id))).await??;
 
     // 5. RDP Session Handshake with timeouts
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??; // Client Info
-    send_tpkt_x224(&mut tls_stream, RDP_DEMAND_ACTIVE_PDU).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, RDP_DEMAND_ACTIVE_PDU)).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??; // Confirm Active
 
@@ -186,8 +191,9 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
         format!("{}:{}", header.target_host, header.target_port)
     };
 
-    println!("[+] Establishing outbound proxy stream to: {}", target_addr);
-    let outbound = TcpStream::connect(&target_addr).await?;
+    println!("Establishing outbound proxy stream to: {}", target_addr);
+    let outbound = timeout(Duration::from_secs(IO_TIMEOUT_SECS), TcpStream::connect(&target_addr))
+        .await??;
     outbound.set_nodelay(true)?;
 
     // 7. Proxy Duplex with graceful shutdown using abort handles
@@ -301,8 +307,8 @@ async fn handle_client_conn(
     remote.set_nodelay(true)?;
     
     // RDP Connection Negotiation with timeout
-    remote.write_all(&create_rdp_cr()).await?;
-    remote.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), remote.write_all(&create_rdp_cr())).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), remote.flush()).await??;
 
     let mut cc_buf = [0u8; 19];
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), remote.read_exact(&mut cc_buf))
@@ -317,40 +323,40 @@ async fn handle_client_conn(
     let mut rbuf = Vec::with_capacity(4096);
 
     // CredSSP Exchange with timeouts
-    tls_stream.write_all(&create_ntlmssp_negotiate()).await?;
-    tls_stream.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.write_all(&create_ntlmssp_negotiate())).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.flush()).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_ber_frame(&mut tls_stream, &mut rbuf))
         .await??;
 
     let server_nonce = extract_ntlmssp_challenge(&rbuf)
         .ok_or_else(|| anyhow::anyhow!("Failed to extract NTLM challenge from server"))?;
 
-    tls_stream.write_all(&create_ntlmssp_auth(&server_nonce)).await?;
-    tls_stream.flush().await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.write_all(&create_ntlmssp_auth(&server_nonce))).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), tls_stream.flush()).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_ber_frame(&mut tls_stream, &mut rbuf))
         .await??;
 
     // MCS Sequences with timeouts
-    send_tpkt_x224(&mut tls_stream, MCS_CONNECT_INITIAL).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, MCS_CONNECT_INITIAL)).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??;
 
-    send_tpkt_x224(&mut tls_stream, MCS_ERECT_DOMAIN_REQ).await?;
-    send_tpkt_x224(&mut tls_stream, MCS_ATTACH_USER_REQ).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, MCS_ERECT_DOMAIN_REQ)).await??;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, MCS_ATTACH_USER_REQ)).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??;
 
     let user_id = 1001u16;
     let channel_id = 0x03ebu16;
-    send_tpkt_x224(&mut tls_stream, &create_mcs_channel_join_req(user_id, channel_id)).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, &create_mcs_channel_join_req(user_id, channel_id))).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??;
 
     // Session Exchange with timeouts
-    send_tpkt_x224(&mut tls_stream, RDP_CLIENT_INFO_PDU).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, RDP_CLIENT_INFO_PDU)).await??;
     timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_tpkt_x224(&mut tls_stream, &mut rbuf))
         .await??;
-    send_tpkt_x224(&mut tls_stream, RDP_CONFIRM_ACTIVE_PDU).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_tpkt_x224(&mut tls_stream, RDP_CONFIRM_ACTIVE_PDU)).await??;
 
     // Encapsulated & Masked VLESS Header
     let vless = VlessHeader {
@@ -358,7 +364,7 @@ async fn handle_client_conn(
         target_host: target.host,
         target_port: target.port,
     };
-    send_rdp_vc_pdu(&mut tls_stream, &vless.serialize_masked()?).await?;
+    timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_rdp_vc_pdu(&mut tls_stream, &vless.serialize_masked()?)).await??;
 
     // Duplex Stream with graceful shutdown using abort handles
     let (mut tls_reader, mut tls_writer) = tokio::io::split(tls_stream);
@@ -421,8 +427,8 @@ async fn handle_client_conn(
 }
 
 fn create_rdp_tls_acceptor() -> Result<TlsAcceptor> {
-    let cert_der = CertificateDer::from(SERVER_CERT_DER.clone());
-    let key_der = PrivateKeyDer::Pkcs8(SERVER_KEY_DER.clone().into());
+    let cert_der = CertificateDer::from(STATIC_CERT.cert_der.clone());
+    let key_der = PrivateKeyDer::Pkcs8(STATIC_CERT.key_der.clone().into());
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
@@ -451,7 +457,7 @@ fn create_insecure_connector() -> TlsConnector {
             let mut hash = [0u8; 32];
             hash.copy_from_slice(digest.as_ref());
             
-            if hash == *PINNED_CERT_FINGERPRINT {
+            if hash == STATIC_CERT.fingerprint {
                 Ok(ServerCertVerified::assertion())
             } else {
                 Err(RustlsError::General("certificate fingerprint mismatch - possible MITM attack".into()))
@@ -460,20 +466,44 @@ fn create_insecure_connector() -> TlsConnector {
 
         fn verify_tls12_signature(
             &self,
-            _message: &[u8],
-            _cert: &rustls_pki_types::CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
+            message: &[u8],
+            cert: &rustls_pki_types::CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
         ) -> Result<HandshakeSignatureValid, RustlsError> {
-            Ok(HandshakeSignatureValid::assertion())
+            // Use standard WebPKI signature verification instead of always accepting
+            use tokio_rustls::rustls::client::WebPkiServerVerifier;
+            use tokio_rustls::rustls::RootCertStore;
+            
+            // Create a root store with our pinned certificate as the trust anchor
+            let mut root_store = RootCertStore::empty();
+            root_store.add(CertificateDer::from(STATIC_CERT.cert_der.clone()))?;
+            
+            let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
+                .build()
+                .map_err(|e| RustlsError::General(format!("failed to build verifier: {:?}", e)))?;
+            
+            verifier.verify_tls12_signature(message, cert, dss)
         }
 
         fn verify_tls13_signature(
             &self,
-            _message: &[u8],
-            _cert: &rustls_pki_types::CertificateDer<'_>,
-            _dss: &DigitallySignedStruct,
+            message: &[u8],
+            cert: &rustls_pki_types::CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
         ) -> Result<HandshakeSignatureValid, RustlsError> {
-            Ok(HandshakeSignatureValid::assertion())
+            // Use standard WebPKI signature verification instead of always accepting
+            use tokio_rustls::rustls::client::WebPkiServerVerifier;
+            use tokio_rustls::rustls::RootCertStore;
+            
+            // Create a root store with our pinned certificate as the trust anchor
+            let mut root_store = RootCertStore::empty();
+            root_store.add(CertificateDer::from(STATIC_CERT.cert_der.clone()))?;
+            
+            let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
+                .build()
+                .map_err(|e| RustlsError::General(format!("failed to build verifier: {:?}", e)))?;
+            
+            verifier.verify_tls13_signature(message, cert, dss)
         }
 
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {

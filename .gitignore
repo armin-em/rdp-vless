@@ -1,41 +1,5 @@
-```
-# Rust-specific ignores
+```rust
 target/
-Cargo.lock
 **/*.rs.bk
-**/*.rlib
-
-# Dependencies
-vendor/
-
-# Build artifacts
-**/*.o
-**/*.a
-**/*.so
-**/*.dylib
-**/*.dll
-
-# Logs and temp files
-*.log
-*.tmp
-
-# Environment
-.env
-.env.local
-*.env.*
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
+*.lock
 ```

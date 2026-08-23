@@ -488,6 +488,11 @@ pub async fn recv_rdp_vc_pdu<R: AsyncReadExt + Unpin>(
         bail!("Invalid RDP Virtual Channel frame length: {}", pdu_len);
     }
 
+    // Enforce maximum TPKT frame size
+    if pdu_len > MAX_TPKT_FRAME {
+        bail!("RDP VC PDU frame too large: {}", pdu_len);
+    }
+
     let body_len = pdu_len - 4;
     buf.resize(body_len, 0);
     stream.read_exact(buf).await?;
