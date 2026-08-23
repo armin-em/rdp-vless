@@ -21,6 +21,30 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 100;
 // Default IO timeout in seconds
 const IO_TIMEOUT_SECS: u64 = 30;
 
+// Static Certificate Configuration
+// Generate a static self-signed cert at startup so the fingerprint is consistent for pinning
+static SERVER_CERT_DER: once_cell::sync::Lazy<Vec<u8>> = once_cell::sync::Lazy::new(|| {
+    let san = vec!["win-serv2022-dc.local".to_string(), "localhost".to_string()];
+    let cert = generate_simple_self_signed(san).unwrap();
+    cert.cert.der().to_vec()
+});
+
+static SERVER_KEY_DER: once_cell::sync::Lazy<Vec<u8>> = once_cell::sync::Lazy::new(|| {
+    let san = vec!["win-serv2022-dc.local".to_string(), "localhost".to_string()];
+    let cert = generate_simple_self_signed(san).unwrap();
+    cert.key_pair.serialize_der()
+});
+
+// Compute the pinned fingerprint of the static server certificate (SHA-256)
+static PINNED_CERT_FINGERPRINT: once_cell::sync::Lazy<[u8; 32]> = once_cell::sync::Lazy::new(|| {
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    context.update(&SERVER_CERT_DER);
+    let digest = context.finish();
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(digest.as_ref());
+    hash
+});
+
 #[derive(Parser)]
 #[command(name = "rdp-vless-tunnel")]
 #[command(about = "Synthesized RDP-Framed VLESS Obfuscation Proxy")]
@@ -166,7 +190,7 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
     let outbound = TcpStream::connect(&target_addr).await?;
     outbound.set_nodelay(true)?;
 
-    // 7. Proxy Duplex using copy_bidirectional for graceful shutdown
+    // 7. Proxy Duplex with graceful shutdown using abort handles
     let (mut tls_reader, mut tls_writer) = tokio::io::split(tls_stream);
     let (mut out_reader, mut out_writer) = outbound.into_split();
 
@@ -175,14 +199,16 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
         loop {
             match timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_rdp_vc_pdu(&mut tls_reader, &mut buf)).await {
                 Ok(Ok((s, e))) if e > s => {
-                    if out_writer.write_all(&buf[s..e]).await.is_err() {
-                        break;
+                    match timeout(Duration::from_secs(IO_TIMEOUT_SECS), out_writer.write_all(&buf[s..e])).await {
+                        Ok(Ok(_)) => {},
+                        _ => break,
                     }
                 }
                 _ => break,
             }
         }
         let _ = out_writer.shutdown().await;
+        Result::<()>::Ok(())
     };
 
     let outbound_task = async move {
@@ -190,18 +216,36 @@ async fn handle_server_conn(mut stream: TcpStream, acceptor: TlsAcceptor, allowe
         loop {
             match timeout(Duration::from_secs(IO_TIMEOUT_SECS), out_reader.read(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => {
-                    if send_rdp_vc_pdu(&mut tls_writer, &buf[..n]).await.is_err() {
-                        break;
+                    match timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_rdp_vc_pdu(&mut tls_writer, &buf[..n])).await {
+                        Ok(Ok(_)) => {},
+                        _ => break,
                     }
                 }
                 _ => break,
             }
         }
         let _ = tls_writer.shutdown().await;
+        Result::<()>::Ok(())
     };
 
-    // Run both tasks and wait for both to complete
-    tokio::join!(inbound_task, outbound_task);
+    // Use select with AbortHandle to ensure both tasks complete or are cancelled
+    let mut inbound_handle = tokio::spawn(inbound_task);
+    let mut outbound_handle = tokio::spawn(outbound_task);
+
+    tokio::select! {
+        res = &mut inbound_handle => {
+            outbound_handle.abort();
+            if let Err(e) = res {
+                eprintln!("Inbound task error: {:?}", e);
+            }
+        }
+        res = &mut outbound_handle => {
+            inbound_handle.abort();
+            if let Err(e) = res {
+                eprintln!("Outbound task error: {:?}", e);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -247,9 +291,13 @@ async fn handle_client_conn(
     // Set TCP_NODELAY for low latency
     local_stream.set_nodelay(true)?;
     
-    let target = handle_socks5_handshake(&mut local_stream).await?;
+    // Handle SOCKS5 handshake with timeout
+    let target = timeout(Duration::from_secs(IO_TIMEOUT_SECS), handle_socks5_handshake(&mut local_stream))
+        .await??;
 
-    let mut remote = TcpStream::connect(server_addr).await?;
+    // Connect to remote server with timeout
+    let mut remote = timeout(Duration::from_secs(IO_TIMEOUT_SECS), TcpStream::connect(server_addr))
+        .await??;
     remote.set_nodelay(true)?;
     
     // RDP Connection Negotiation with timeout
@@ -312,7 +360,7 @@ async fn handle_client_conn(
     };
     send_rdp_vc_pdu(&mut tls_stream, &vless.serialize_masked()?).await?;
 
-    // Duplex Stream with graceful shutdown
+    // Duplex Stream with graceful shutdown using abort handles
     let (mut tls_reader, mut tls_writer) = tokio::io::split(tls_stream);
     let (mut local_reader, mut local_writer) = local_stream.into_split();
 
@@ -321,14 +369,16 @@ async fn handle_client_conn(
         loop {
             match timeout(Duration::from_secs(IO_TIMEOUT_SECS), recv_rdp_vc_pdu(&mut tls_reader, &mut buf)).await {
                 Ok(Ok((s, e))) if e > s => {
-                    if local_writer.write_all(&buf[s..e]).await.is_err() {
-                        break;
+                    match timeout(Duration::from_secs(IO_TIMEOUT_SECS), local_writer.write_all(&buf[s..e])).await {
+                        Ok(Ok(_)) => {},
+                        _ => break,
                     }
                 }
                 _ => break,
             }
         }
         let _ = local_writer.shutdown().await;
+        Result::<()>::Ok(())
     };
 
     let outbound = async move {
@@ -336,27 +386,43 @@ async fn handle_client_conn(
         loop {
             match timeout(Duration::from_secs(IO_TIMEOUT_SECS), local_reader.read(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => {
-                    if send_rdp_vc_pdu(&mut tls_writer, &buf[..n]).await.is_err() {
-                        break;
+                    match timeout(Duration::from_secs(IO_TIMEOUT_SECS), send_rdp_vc_pdu(&mut tls_writer, &buf[..n])).await {
+                        Ok(Ok(_)) => {},
+                        _ => break,
                     }
                 }
                 _ => break,
             }
         }
         let _ = tls_writer.shutdown().await;
+        Result::<()>::Ok(())
     };
 
-    // Run both tasks and wait for both to complete
-    tokio::join!(inbound, outbound);
+    // Use select with AbortHandle to ensure both tasks complete or are cancelled
+    let mut inbound_handle = tokio::spawn(inbound);
+    let mut outbound_handle = tokio::spawn(outbound);
+
+    tokio::select! {
+        res = &mut inbound_handle => {
+            outbound_handle.abort();
+            if let Err(e) = res {
+                eprintln!("Client inbound task error: {:?}", e);
+            }
+        }
+        res = &mut outbound_handle => {
+            inbound_handle.abort();
+            if let Err(e) = res {
+                eprintln!("Client outbound task error: {:?}", e);
+            }
+        }
+    }
 
     Ok(())
 }
 
 fn create_rdp_tls_acceptor() -> Result<TlsAcceptor> {
-    let san = vec!["win-serv2022-dc.local".to_string(), "localhost".to_string()];
-    let cert = generate_simple_self_signed(san)?;
-    let cert_der = CertificateDer::from(cert.cert.der().to_vec());
-    let key_der = PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into());
+    let cert_der = CertificateDer::from(SERVER_CERT_DER.clone());
+    let key_der = PrivateKeyDer::Pkcs8(SERVER_KEY_DER.clone().into());
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
@@ -372,13 +438,24 @@ fn create_insecure_connector() -> TlsConnector {
     impl ServerCertVerifier for DangerousVerifier {
         fn verify_server_cert(
             &self,
-            _end_entity: &rustls_pki_types::CertificateDer<'_>,
+            end_entity: &rustls_pki_types::CertificateDer<'_>,
             _intermediates: &[rustls_pki_types::CertificateDer<'_>],
             _server_name: &ServerName<'_>,
             _ocsp_response: &[u8],
             _now: rustls_pki_types::UnixTime,
         ) -> Result<ServerCertVerified, RustlsError> {
-            Ok(ServerCertVerified::assertion())
+            // Pin the server certificate by comparing SHA-256 fingerprint
+            let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+            context.update(end_entity.as_ref());
+            let digest = context.finish();
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(digest.as_ref());
+            
+            if hash == *PINNED_CERT_FINGERPRINT {
+                Ok(ServerCertVerified::assertion())
+            } else {
+                Err(RustlsError::General("certificate fingerprint mismatch - possible MITM attack".into()))
+            }
         }
 
         fn verify_tls12_signature(

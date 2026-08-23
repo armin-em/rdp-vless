@@ -371,6 +371,10 @@ pub async fn recv_tpkt_x224<R: AsyncReadExt + Unpin>(stream: &mut R, buf: &mut V
     if pdu_len < 7 {
         bail!("TPKT frame length underflow");
     }
+    // Enforce maximum TPKT frame size
+    if pdu_len > MAX_TPKT_FRAME {
+        bail!("TPKT frame too large: {}", pdu_len);
+    }
     let body_len = pdu_len - 7;
     buf.resize(body_len, 0);
     stream.read_exact(buf).await?;
