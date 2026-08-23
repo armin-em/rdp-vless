@@ -11,43 +11,17 @@ This project operates as an **obfuscated transport tunnel**, not a full Microsof
 * **Authentication Boundary**: Authentication between client and proxy relies on shared UUID masking across the tunnel header. It does not validate real NTLMv2 hashes or compute HMAC-MD5 responses against a Domain Controller.
 
 ## Protocol Stack
-flowchart TD
-    subgraph Step0 ["SOCKS5 Local Client Request"]
-        direction TB
-        A0["IPv4 / IPv6 / Domain Target"]
-    end
-
-    subgraph Step1 ["Layer 1: X.224 Connection Request / Confirm Negotiation"]
-        direction TB
-        A1["Port 3389"]
-    end
-
-    subgraph Step2 ["Layer 2: TLS Upgrade"]
-        direction TB
-        A2["TLS 1.2 / 1.3 with RDP SAN certificates"]
-    end
-
-    subgraph Step3 ["Layer 3: CredSSP Handshake"]
-        direction TB
-        A3["ASN.1 BER / NTLMSSP Frame Synthetic"]
-    end
-
-    subgraph Step4 ["Layer 4: MCS Control Sequence"]
-        direction TB
-        A4["Erect Domain, Attach User, Join"]
-    end
-
-    subgraph Step5 ["Layer 5: RDP Session Handshake"]
-        direction TB
-        A5["Client Info, Demand/Confirm"]
-    end
-
-    subgraph Step6 ["Layer 6: Proxy Framing"]
-        direction TB
-        A6["Virtual Channel Framing + UUID Masked VLESS Proxy Header"]
-    end
-
-    Step0 --> Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Step6
+[ SOCKS5 Local Client Request (IPv4 / IPv6 / Domain Target) ]
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│ L1: X.224 Negotiation (Port 3389)                           │
+│ L2: TLS 1.2 / 1.3 Upgrade (RDP SAN certificates)            │
+│ L3: CredSSP Handshake (ASN.1 BER / NTLMSSP Frame)           │
+│ L4: MCS Control Sequence (Erect Domain, Attach, Join)       │
+│ L5: RDP Session Handshake (Client Info, Demand/Confirm)     │
+│ L6: Virtual Channel Framing + UUID Masked VLESS Header      │
+└─────────────────────────────────────────────────────────────┘
 
 
 ## Setup & Running
