@@ -431,11 +431,13 @@ dependencies = [
 
 [[package]]
 name = "rdp-vless-tunnel"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
+ "once_cell",
  "rcgen",
+ "ring",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
