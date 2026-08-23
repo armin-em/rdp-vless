@@ -11,17 +11,14 @@ This project operates as an **obfuscated transport tunnel**, not a full Microsof
 * **Authentication Boundary**: Authentication between client and proxy relies on shared UUID masking across the tunnel header. It does not validate real NTLMv2 hashes or compute HMAC-MD5 responses against a Domain Controller.
 
 ## Protocol Stack
-[ SOCKS5 Local Client Request (IPv4 / IPv6 / Domain Target) ]
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│ L1: X.224 Negotiation (Port 3389)                           │
-│ L2: TLS 1.2 / 1.3 Upgrade (RDP SAN certificates)            │
-│ L3: CredSSP Handshake (ASN.1 BER / NTLMSSP Frame)           │
-│ L4: MCS Control Sequence (Erect Domain, Attach, Join)       │
-│ L5: RDP Session Handshake (Client Info, Demand/Confirm)     │
-│ L6: Virtual Channel Framing + UUID Masked VLESS Header      │
-└─────────────────────────────────────────────────────────────┘
+SOCKS5 Local Client Request (IPv4 / IPv6 / Domain Target)
+  │
+  ├─► L1: X.224 Connection Request / Confirm Negotiation (Port 3389)
+  ├─► L2: TLS Upgrade (TLS 1.2 / 1.3 with RDP SAN certificates)
+  ├─► L3: CredSSP Handshake (ASN.1 BER / NTLMSSP Frame Synthetic)
+  ├─► L4: MCS Control Sequence (Erect Domain, Attach User, Join)
+  ├─► L5: RDP Session Handshake (Client Info, Demand/Confirm)
+  └─► L6: Virtual Channel Framing + UUID Masked VLESS Proxy Header
 
 
 ## Setup & Running
