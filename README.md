@@ -12,13 +12,42 @@ This project operates as an **obfuscated transport tunnel**, not a full Microsof
 
 ## Protocol Stack
 flowchart TD
-    A["SOCKS5 Local Client Request<br>(IPv4 / IPv6 / Domain Target)"] --> B
-    B["Layer 1: X.224 Connection Request / Confirm Negotiation<br>(Port 3389)"] --> C
-    C["Layer 2: TLS Upgrade<br>(TLS 1.2 / 1.3 with RDP SAN certificates)"] --> D
-    D["Layer 3: CredSSP Handshake<br>(ASN.1 BER / NTLMSSP Frame Synthetic)"] --> E
-    E["Layer 4: MCS Control Sequence<br>(Erect Domain, Attach User, Join)"] --> F
-    F["Layer 5: RDP Session Handshake<br>(Client Info, Demand/Confirm)"] --> G
-    G["Layer 6: Virtual Channel Framing + UUID Masked VLESS Proxy Header"]
+    subgraph Step0 ["SOCKS5 Local Client Request"]
+        direction TB
+        A0["IPv4 / IPv6 / Domain Target"]
+    end
+
+    subgraph Step1 ["Layer 1: X.224 Connection Request / Confirm Negotiation"]
+        direction TB
+        A1["Port 3389"]
+    end
+
+    subgraph Step2 ["Layer 2: TLS Upgrade"]
+        direction TB
+        A2["TLS 1.2 / 1.3 with RDP SAN certificates"]
+    end
+
+    subgraph Step3 ["Layer 3: CredSSP Handshake"]
+        direction TB
+        A3["ASN.1 BER / NTLMSSP Frame Synthetic"]
+    end
+
+    subgraph Step4 ["Layer 4: MCS Control Sequence"]
+        direction TB
+        A4["Erect Domain, Attach User, Join"]
+    end
+
+    subgraph Step5 ["Layer 5: RDP Session Handshake"]
+        direction TB
+        A5["Client Info, Demand/Confirm"]
+    end
+
+    subgraph Step6 ["Layer 6: Proxy Framing"]
+        direction TB
+        A6["Virtual Channel Framing + UUID Masked VLESS Proxy Header"]
+    end
+
+    Step0 --> Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Step6
 
 
 ## Setup & Running
